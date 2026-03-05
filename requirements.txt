@@ -1,0 +1,6 @@
+# ACS Python dependencies
+# These are required only for acs_ingest.py (planning document ingestion)
+# verify_state.py and setup.sh have no external Python dependencies
+
+anthropic>=0.40.0
+python-docx>=1.1.0

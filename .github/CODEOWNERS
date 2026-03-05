@@ -1,0 +1,22 @@
+# CODEOWNERS — ACS Repository
+# All changes require review from the repository owner.
+# Changes to scripts require explicit approval before merge.
+# Format: pattern  @username
+
+# Default owner for everything
+*                           @yourusername
+
+# Scripts — highest security sensitivity
+# Any PR touching these files requires owner review
+/scripts/                   @yourusername
+/setup.sh                   @yourusername
+
+# Templates — changes affect all users who run setup.sh
+/templates/                 @yourusername
+
+# Security and governance documents
+/SECURITY.md                @yourusername
+/.github/                   @yourusername
+
+# Documentation
+/docs/                      @yourusername

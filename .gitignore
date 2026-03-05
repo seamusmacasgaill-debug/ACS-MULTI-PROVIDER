@@ -1,0 +1,48 @@
+# ACS Repository .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+
+# Environment and secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+secrets.yaml
+secrets.yml
+
+# ACS runtime files — generated, not source
+.claude/last_verification.json
+.claude/ingestion_result.json
+.claude/CHECKPOINT.md
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# Test coverage
+.coverage
+htmlcov/
+coverage.xml

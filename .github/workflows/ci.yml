@@ -1,0 +1,186 @@
+name: ACS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read        # Minimum needed — read repo only
+  security-events: write  # Needed for Gitleaks to report findings
+
+jobs:
+  # ── Job 1: Verify all scripts are syntactically valid ──────────────────────
+  verify-scripts:
+    name: Verify script integrity
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install anthropic python-docx --quiet
+
+      - name: Check Python syntax — verify_state.py
+        run: python -m py_compile scripts/verify_state.py
+
+      - name: Check Python syntax — acs_ingest.py
+        run: python -m py_compile scripts/acs_ingest.py
+
+      - name: Check shell syntax — setup.sh
+        run: bash -n setup.sh
+
+      - name: Check shell syntax — init_acs.sh
+        run: bash -n scripts/init_acs.sh
+
+      - name: Run setup.sh in dry-run mode
+        run: |
+          mkdir -p /tmp/test-project
+          cd /tmp/test-project
+          git init
+          git config user.email "ci@acs-test.local"
+          git config user.name "ACS CI"
+          bash $GITHUB_WORKSPACE/setup.sh "CI Test Project" "Testing ACS" --dry-run
+
+      - name: Run full setup on a clean project
+        run: |
+          mkdir -p /tmp/full-test
+          cd /tmp/full-test
+          git init
+          git config user.email "ci@acs-test.local"
+          git config user.name "ACS CI"
+          bash $GITHUB_WORKSPACE/setup.sh "Full Test Project" "Full integration test" --force
+          echo "--- Setup complete, running verification ---"
+          python .claude/scripts/verify_state.py
+
+      - name: Confirm verify_state.py exits 0 on clean project
+        run: |
+          cd /tmp/full-test
+          python .claude/scripts/verify_state.py
+          if [ $? -ne 0 ]; then
+            echo "FAIL: verify_state.py returned non-zero on a clean project"
+            exit 1
+          fi
+          echo "PASS: verify_state.py exits 0 on clean project"
+
+  # ── Job 2: Shell script linting ────────────────────────────────────────────
+  lint-shell:
+    name: Shell script linting (shellcheck)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint setup.sh
+        run: shellcheck --severity=warning setup.sh
+
+      - name: Lint init_acs.sh
+        run: shellcheck --severity=warning scripts/init_acs.sh
+
+  # ── Job 3: Secret scanning ─────────────────────────────────────────────────
+  check-no-secrets:
+    name: Secret scanning (Gitleaks)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for Gitleaks
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Job 4: Confirm no executable bits on non-scripts ──────────────────────
+  check-permissions:
+    name: Check file permissions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that only intended files are executable
+        run: |
+          echo "Files with executable bit set:"
+          find . -not -path './.git/*' -perm /111 -type f | sort
+
+          # Only .sh files and the verify_state.py should be executable
+          UNEXPECTED=$(find . -not -path './.git/*' \
+            -perm /111 -type f \
+            ! -name "*.sh" \
+            ! -name "verify_state.py" \
+            ! -name "*.py")
+
+          if [ -n "$UNEXPECTED" ]; then
+            echo "FAIL: Unexpected executable files found:"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+          echo "PASS: No unexpected executable files"
+
+  # ── Job 5: Documentation completeness check ───────────────────────────────
+  check-docs:
+    name: Check documentation completeness
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm required files exist
+        run: |
+          REQUIRED=(
+            "README.md"
+            "LICENSE"
+            "SECURITY.md"
+            "setup.sh"
+            "docs/ACS_PROTOCOL.md"
+            "docs/CHANGELOG.md"
+            "scripts/verify_state.py"
+            "scripts/acs_ingest.py"
+            "scripts/init_acs.sh"
+            "templates/CLAUDE.md"
+            "templates/MUST_READ.md"
+            "templates/STATE.md"
+            "templates/MEMORY.md"
+            "templates/CHECKPOINT.md"
+            "templates/PROTOCOL.md"
+            ".github/CODEOWNERS"
+            ".github/SECURITY.md"
+          )
+
+          MISSING=false
+          for f in "${REQUIRED[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "MISSING: $f"
+              MISSING=true
+            else
+              echo "OK: $f"
+            fi
+          done
+
+          if [ "$MISSING" = true ]; then
+            exit 1
+          fi
+          echo "All required files present"
+
+      - name: Check CLAUDE.md template is under 100 lines
+        run: |
+          LINES=$(wc -l < templates/CLAUDE.md)
+          echo "CLAUDE.md template: $LINES lines"
+          if [ "$LINES" -gt 100 ]; then
+            echo "FAIL: templates/CLAUDE.md exceeds 100 lines ($LINES)"
+            exit 1
+          fi
+          echo "PASS: within 100 line limit"
