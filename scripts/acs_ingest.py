@@ -5,32 +5,32 @@ acs_ingest.py — ACS Planning Document Ingestion Script
 Reads any existing planning document (BMAD, DevOps plan, product spec,
 milestone doc, README, etc.) and automatically populates:
 
-  - .claude/STATE.md        (all tasks/milestones as NOT_STARTED rows)
-  - .claude/MUST_READ.md    (first session brief derived from the plan)
-  - .claude/MEMORY.md       (architectural decisions and context extracted)
-  - CLAUDE.md               (ACS trigger file for Claude Code)
+  - <acs-dir>/STATE.md
+  - <acs-dir>/MUST_READ.md
+  - <acs-dir>/MEMORY.md
+  - <acs-dir>/PROTOCOL.md
+  - CLAUDE.md / AGENT.md  (ACS trigger file)
 
 Supports input formats:
-  - Markdown (.md)
-  - Plain text (.txt)
-  - Word document (.docx)
-  - Multiple files at once (pass several paths)
+  - Markdown (.md), Plain text (.txt), Word document (.docx)
+  - Multiple files at once
+
+Supported LLM providers:
+  - anthropic  (default) — pip install anthropic
+  - openai               — pip install openai
+  - gemini               — pip install google-generativeai
+  - ollama     (local)   — pip install ollama  +  ollama server running
 
 Usage:
-  python acs_ingest.py --input BMAD.md
-  python acs_ingest.py --input plan.docx
-  python acs_ingest.py --input BMAD.md devops.md architecture.md
-  python acs_ingest.py --input plan.md --project-name "My Project" --dry-run
+  python acs_ingest.py --input plan.md
+  python acs_ingest.py --input plan.md --provider openai --model gpt-4o
+  python acs_ingest.py --input plan.md --provider gemini --model gemini-1.5-pro
+  python acs_ingest.py --input plan.md --provider ollama --model llama3
+  python acs_ingest.py --input plan.md --provider auto        # detect from env
+  python acs_ingest.py --input plan.md --acs-dir .acs --agent-file AGENT.md
 
-Requirements:
-  pip install anthropic python-docx
-
-The script uses the Claude API (claude-sonnet-4-20250514) to parse the
-planning document intelligently. Set ANTHROPIC_API_KEY in your environment
-or .env file before running.
-
-The script is SAFE to re-run. If ACS files already exist, it will show
-a diff and ask for confirmation before overwriting.
+Auto-detection priority (--provider auto):
+  ANTHROPIC_API_KEY → openai: OPENAI_API_KEY → gemini: GEMINI_API_KEY → ollama
 """
 
 import argparse
@@ -38,517 +38,468 @@ import json
 import os
 import re
 import sys
+from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 
 # ── optional imports ──────────────────────────────────────────────────────────
-try:
-    import anthropic
-except ImportError:
-    print("ERROR: anthropic package not installed.")
-    print("Run: pip install anthropic")
-    sys.exit(1)
-
 try:
     from docx import Document as DocxDocument
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
 
-
-# ── constants ─────────────────────────────────────────────────────────────────
-
-MODEL = "claude-sonnet-4-20250514"
-CLAUDE_DIR = Path(".claude")
-SCRIPTS_DIR = CLAUDE_DIR / "scripts"
 NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-EXTRACTION_PROMPT = """You are reading a software project planning document.
-Your job is to extract structured information to populate an ACS (Absolute
-Continuity System) project tracking setup.
-
-Extract the following and return ONLY valid JSON — no explanation, no markdown
-fences, no preamble:
-
-{
-  "project_name": "string — the project name",
-  "project_description": "string — 1-2 sentence description of what the project does",
-  "tech_stack": ["list", "of", "technologies", "mentioned"],
-  "phases": [
-    {
-      "phase_number": 1,
-      "phase_name": "string",
-      "phase_description": "string — one sentence"
-    }
-  ],
-  "milestones": [
-    {
-      "id": "M-001",
-      "phase": 1,
-      "name": "string — short milestone name",
-      "description": "string — what this milestone achieves",
-      "category": "Infrastructure|DataPipeline|FeatureEngineering|Model|API|Testing|Deployment|Other",
-      "size": "SMALL|MEDIUM|LARGE",
-      "dependencies": ["M-000"]
-    }
-  ],
-  "components": [
-    {
-      "name": "string — component name",
-      "description": "string",
-      "category": "Infrastructure|DataPipeline|FeatureEngineering|Model|API|Testing|Deployment"
-    }
-  ],
-  "architectural_decisions": [
-    {
-      "title": "string",
-      "decision": "string",
-      "rationale": "string"
-    }
-  ],
-  "external_dependencies": [
-    {
-      "name": "string",
-      "purpose": "string",
-      "version_or_notes": "string"
-    }
-  ],
-  "key_constraints": ["string — any important constraints or non-negotiables"],
-  "first_session_tasks": ["string — the first 3-5 things to do, in order"],
-  "branch_strategy": "string — if mentioned, otherwise 'main / feature branches'",
-  "environment_notes": "string — any environment or deployment notes"
+DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "openai":    "gpt-4o",
+    "gemini":    "gemini-1.5-pro",
+    "ollama":    "llama3",
 }
 
-Rules:
-- Use "Unknown" for anything not mentioned in the document
-- For milestones, assign sequential IDs like M-001, M-002 etc
-- Infer size: SMALL = single function/config, MEDIUM = module with tests,
-  LARGE = multi-component feature
-- If phases are not explicit, infer them from logical groupings
-- Extract ALL milestones and tasks mentioned, even implicitly
-- Do not invent information not present in the document
-- first_session_tasks should be the literal first things to do in session 1
+EXTRACTION_PROMPT = """You are reading a software project planning document.
+Extract structured information to populate an ACS project tracking setup.
 
-Document to analyse:
+Return ONLY valid JSON — no explanation, no markdown fences, no preamble:
+
+{{
+  "project_name": "string",
+  "project_description": "string — 1-2 sentences",
+  "tech_stack": ["list", "of", "technologies"],
+  "phases": [
+    {{"phase_number": 1, "phase_name": "string", "phase_description": "string"}}
+  ],
+  "milestones": [
+    {{
+      "id": "M-001",
+      "phase": 1,
+      "name": "string",
+      "description": "string",
+      "category": "Infrastructure|DataPipeline|FeatureEngineering|Model|API|Testing|Deployment|Other",
+      "size": "SMALL|MEDIUM|LARGE",
+      "dependencies": []
+    }}
+  ],
+  "components": [
+    {{"name": "string", "description": "string", "category": "string"}}
+  ],
+  "architectural_decisions": [
+    {{"title": "string", "decision": "string", "rationale": "string"}}
+  ],
+  "external_dependencies": [
+    {{"name": "string", "purpose": "string", "version_or_notes": "string"}}
+  ],
+  "key_constraints": ["string"],
+  "first_session_tasks": ["string — first 3-5 things to do, in order"],
+  "branch_strategy": "string",
+  "environment_notes": "string"
+}}
+
+Rules:
+- Use "Unknown" for anything not in the document
+- Milestone IDs: M-001, M-002, ...
+- Size: SMALL=single func/config, MEDIUM=module+tests, LARGE=multi-component
+- Infer phases from logical groupings if not explicit
+- Extract ALL milestones, even implicit ones
+- Do not invent information not present in the document
+
+Document:
 ---
 {document_content}
 ---"""
 
 
-# ── document readers ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# LLM CLIENT ABSTRACTION
+# ══════════════════════════════════════════════════════════════════════════════
 
-def read_markdown(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+class LLMClient(ABC):
+    def __init__(self, api_key: str | None, model: str):
+        self.api_key = api_key
+        self.model = model
+
+    @abstractmethod
+    def complete(self, prompt: str, max_tokens: int = 4000) -> str: ...
+
+    @classmethod
+    @abstractmethod
+    def provider_name(cls) -> str: ...
+
+    @classmethod
+    @abstractmethod
+    def env_var(cls) -> str | None: ...
 
 
-def read_txt(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+class AnthropicClient(LLMClient):
+    @classmethod
+    def provider_name(cls): return "anthropic"
+    @classmethod
+    def env_var(cls): return "ANTHROPIC_API_KEY"
+
+    def __init__(self, api_key, model):
+        super().__init__(api_key, model)
+        try:
+            import anthropic as _a
+        except ImportError:
+            _die("anthropic", "pip install anthropic")
+        self._client = _a.Anthropic(api_key=self.api_key)
+
+    def complete(self, prompt, max_tokens=4000):
+        r = self._client.messages.create(
+            model=self.model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        return r.content[0].text.strip()
 
 
-def read_docx(path: Path) -> str:
-    if not DOCX_AVAILABLE:
-        print(f"ERROR: python-docx not installed. Cannot read {path}")
-        print("Run: pip install python-docx")
+class OpenAIClient(LLMClient):
+    @classmethod
+    def provider_name(cls): return "openai"
+    @classmethod
+    def env_var(cls): return "OPENAI_API_KEY"
+
+    def __init__(self, api_key, model):
+        super().__init__(api_key, model)
+        try:
+            import openai as _o
+        except ImportError:
+            _die("openai", "pip install openai")
+        self._client = _o.OpenAI(api_key=self.api_key)
+
+    def complete(self, prompt, max_tokens=4000):
+        r = self._client.chat.completions.create(
+            model=self.model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+        return r.choices[0].message.content.strip()
+
+
+class GeminiClient(LLMClient):
+    @classmethod
+    def provider_name(cls): return "gemini"
+    @classmethod
+    def env_var(cls): return "GEMINI_API_KEY"
+
+    def __init__(self, api_key, model):
+        super().__init__(api_key, model)
+        try:
+            import google.generativeai as _g
+        except ImportError:
+            _die("google-generativeai", "pip install google-generativeai")
+        _g.configure(api_key=self.api_key)
+        self._model = _g.GenerativeModel(model)
+
+    def complete(self, prompt, max_tokens=4000):
+        r = self._model.generate_content(
+            prompt, generation_config={"max_output_tokens": max_tokens})
+        return r.text.strip()
+
+
+class OllamaClient(LLMClient):
+    """Local Ollama — no API key required."""
+    @classmethod
+    def provider_name(cls): return "ollama"
+    @classmethod
+    def env_var(cls): return None
+
+    def __init__(self, api_key, model):
+        super().__init__(api_key, model)
+        try:
+            import ollama as _ol
+            self._ol = _ol
+        except ImportError:
+            _die("ollama", "pip install ollama  (and ensure ollama server is running)")
+
+    def complete(self, prompt, max_tokens=4000):
+        r = self._ol.chat(model=self.model,
+                          messages=[{"role": "user", "content": prompt}])
+        return r["message"]["content"].strip()
+
+
+def _die(pkg, install_cmd):
+    print(f"ERROR: {pkg} package not installed.\nRun:   {install_cmd}")
+    sys.exit(1)
+
+
+PROVIDERS: dict[str, type[LLMClient]] = {
+    "anthropic": AnthropicClient,
+    "openai":    OpenAIClient,
+    "gemini":    GeminiClient,
+    "ollama":    OllamaClient,
+}
+
+
+def resolve_provider(provider: str, api_key_override: str | None) -> tuple[str, str | None]:
+    """Returns (resolved_provider_name, api_key)."""
+    if provider == "auto":
+        for name in ["anthropic", "openai", "gemini"]:
+            env = PROVIDERS[name].env_var()
+            if env and os.environ.get(env):
+                print(f"  Auto-detected provider: {name} (from {env})")
+                provider = name
+                break
+        else:
+            print("  No API key env vars found — falling back to ollama (local)")
+            provider = "ollama"
+
+    if provider not in PROVIDERS:
+        print(f"ERROR: Unknown provider '{provider}'. Choose: {', '.join(PROVIDERS)}")
         sys.exit(1)
-    doc = DocxDocument(str(path))
-    parts = []
-    for para in doc.paragraphs:
-        if para.text.strip():
-            style = para.style.name
-            if "Heading 1" in style:
-                parts.append(f"\n# {para.text}")
-            elif "Heading 2" in style:
-                parts.append(f"\n## {para.text}")
-            elif "Heading 3" in style:
-                parts.append(f"\n### {para.text}")
-            else:
-                parts.append(para.text)
-    # Include tables
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            parts.append(" | ".join(cells))
-    return "\n".join(parts)
 
+    env_var = PROVIDERS[provider].env_var()
+    api_key = api_key_override or (os.environ.get(env_var) if env_var else None)
+
+    # Try .env file
+    if api_key is None and env_var:
+        env_file = Path(".env")
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith(f"{env_var}="):
+                    api_key = line.split("=", 1)[1].strip().strip('"\'')
+                    break
+
+    if api_key is None and env_var:
+        print(f"ERROR: {env_var} not set.\nSet it as an env var, pass --api-key, or add to .env")
+        sys.exit(1)
+
+    return provider, api_key
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT READERS
+# ══════════════════════════════════════════════════════════════════════════════
 
 def read_input_file(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix in (".md", ".markdown"):
-        return read_markdown(path)
-    elif suffix == ".txt":
-        return read_txt(path)
-    elif suffix == ".docx":
-        return read_docx(path)
-    else:
-        # Try reading as text
-        try:
-            return path.read_text(encoding="utf-8")
-        except Exception:
-            print(f"WARNING: Cannot read {path} — unsupported format. Skipping.")
-            return ""
+    if path.suffix.lower() == ".docx":
+        if not DOCX_AVAILABLE:
+            print(f"ERROR: python-docx not installed.\nRun: pip install python-docx")
+            sys.exit(1)
+        doc = DocxDocument(str(path))
+        parts = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                s = para.style.name
+                prefix = "# " if "Heading 1" in s else "## " if "Heading 2" in s else "### " if "Heading 3" in s else ""
+                parts.append(f"{prefix}{para.text}")
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append(" | ".join(c.text.strip() for c in row.cells))
+        return "\n".join(parts)
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        print(f"WARNING: Cannot read {path} — skipping.")
+        return ""
 
 
-# ── Claude API extraction ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTRACTION
+# ══════════════════════════════════════════════════════════════════════════════
 
-def extract_structure(document_content: str, api_key: str) -> dict:
-    """Use Claude to extract structured project information."""
-    client = anthropic.Anthropic(api_key=api_key)
-
-    print("  Analysing document with Claude API...")
-    prompt = EXTRACTION_PROMPT.format(document_content=document_content[:50000])
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    raw = response.content[0].text.strip()
-    # Strip markdown fences if present
+def extract_structure(document_content: str, client: LLMClient) -> dict:
+    print(f"  Analysing with {client.provider_name()} / {client.model} ...")
+    raw = client.complete(
+        EXTRACTION_PROMPT.format(document_content=document_content[:50000]))
     raw = re.sub(r'^```(?:json)?\s*', '', raw)
     raw = re.sub(r'\s*```$', '', raw)
-
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
-        print(f"ERROR: Claude returned invalid JSON: {e}")
+        print(f"ERROR: LLM returned invalid JSON: {e}")
         print("Raw response (first 500 chars):", raw[:500])
         sys.exit(1)
 
 
-# ── document generators ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT GENERATORS
+# ══════════════════════════════════════════════════════════════════════════════
 
 def generate_state_md(data: dict) -> str:
-    """Generate STATE.md from extracted project structure."""
-
-    # Group milestones by category
-    milestones = data.get("milestones", [])
-    phases = data.get("phases", [])
-    components = data.get("components", [])
-
-    # Build phase name lookup
+    milestones  = data.get("milestones", [])
+    phases      = data.get("phases", [])
     phase_names = {p["phase_number"]: p["phase_name"] for p in phases}
 
-    # Group by phase then category
     by_phase: dict = {}
     for m in milestones:
-        phase = m.get("phase", 1)
-        if phase not in by_phase:
-            by_phase[phase] = {}
-        cat = m.get("category", "Other")
-        if cat not in by_phase[phase]:
-            by_phase[phase][cat] = []
-        by_phase[phase][cat].append(m)
+        by_phase.setdefault(m.get("phase", 1), {}).setdefault(
+            m.get("category", "Other"), []).append(m)
 
     lines = [
         "# PROJECT STATE — VERIFIED COMPLETIONS ONLY",
-        f"**Rule**: Nothing is added here without a verified commit hash.",
+        "**Rule**: Nothing is added here without a verified commit hash.",
         f"**Last verification run**: {NOW}",
         f"**Project**: {data.get('project_name', 'Unknown')}",
-        f"**Auto-generated from**: Planning document ingestion ({NOW})",
-        "",
-        "---",
-        "",
+        f"**Auto-generated**: {NOW}",
+        "", "---", "",
         "## LEGEND",
-        "| Status | Meaning |",
-        "|--------|---------|",
-        "| `VERIFIED` | Confirmed working — commit hash and test evidence recorded |",
+        "| Status | Meaning |", "|--------|---------|",
+        "| `VERIFIED` | Confirmed — commit hash and test evidence recorded |",
         "| `IN_PROGRESS` | Currently being built this session |",
-        "| `PARTIAL` | Started but not complete — recovery path documented in CHECKPOINT.md |",
+        "| `PARTIAL` | Started but not complete — see CHECKPOINT.md |",
         "| `NOT_STARTED` | On the roadmap but not yet begun |",
-        "| `BLOCKED` | Cannot proceed — blocker documented in MUST_READ.md |",
-        "",
-        "---",
-        "",
+        "| `BLOCKED` | Cannot proceed — blocker in MUST_READ.md |",
+        "", "---", "",
     ]
 
-    # Phases and milestones
-    for phase_num in sorted(by_phase.keys()):
-        phase_name = phase_names.get(phase_num, f"Phase {phase_num}")
-        lines.append(f"## Phase {phase_num}: {phase_name}")
+    for phase_num in sorted(by_phase):
+        lines.append(f"## Phase {phase_num}: {phase_names.get(phase_num, f'Phase {phase_num}')}")
         lines.append("")
-
-        phase_data = by_phase[phase_num]
-        for category, items in phase_data.items():
-            lines.append(f"### {category}")
-            lines.append("")
-            lines.append("| ID | Milestone | Size | Status | Commit | Verified |")
-            lines.append("|-----|-----------|------|--------|--------|----------|")
-            for item in items:
-                mid = item.get("id", "M-???")
-                name = item.get("name", "Unknown")
-                size = item.get("size", "MEDIUM")
-                desc = item.get("description", "")
-                # Truncate long descriptions for table
-                if len(name) > 50:
-                    name = name[:47] + "..."
-                lines.append(f"| {mid} | {name} | {size} | NOT_STARTED | — | — |")
-                if desc:
-                    lines.append(f"| | *{desc[:80]}* | | | | |")
+        for cat, items in by_phase[phase_num].items():
+            lines += [f"### {cat}", "",
+                      "| ID | Milestone | Size | Status | Commit | Verified |",
+                      "|-----|-----------|------|--------|--------|----------|"]
+            for m in items:
+                lines.append(
+                    f"| {m.get('id','M-???')} | {m.get('name','Unknown')[:50]} "
+                    f"| {m.get('size','MEDIUM')} | NOT_STARTED | — | — |")
+                if m.get("description"):
+                    lines.append(f"| | *{m['description'][:80]}* | | | | |")
             lines.append("")
 
-    # Infrastructure section (always present)
+    ext_deps = data.get("external_dependencies", [])
     lines += [
-        "---",
-        "",
-        "## Infrastructure & Environment",
-        "",
+        "---", "", "## Infrastructure & Environment", "",
         "| Component | Status | Commit | Verified Timestamp |",
         "|-----------|--------|--------|--------------------|",
-        "| Git repository | VERIFIED | (initial) | " + NOW + " |",
-        "| ACS Protocol files | VERIFIED | (initial) | " + NOW + " |",
+        f"| Git repository | VERIFIED | (initial) | {NOW} |",
+        f"| ACS Protocol files | VERIFIED | (initial) | {NOW} |",
         "| Python environment | NOT_STARTED | — | — |",
-        "| Docker / compose | NOT_STARTED | — | — |",
-        "| Database | NOT_STARTED | — | — |",
     ]
-
-    # External dependencies
-    ext_deps = data.get("external_dependencies", [])
     if ext_deps:
-        lines += [
-            "",
-            "---",
-            "",
-            "## External Dependencies",
-            "",
-            "| Dependency | Purpose | Version / Notes | Status |",
-            "|------------|---------|-----------------|--------|",
-        ]
-        for dep in ext_deps:
-            name = dep.get("name", "Unknown")
-            purpose = dep.get("purpose", "")
-            notes = dep.get("version_or_notes", "—")
-            lines.append(f"| {name} | {purpose} | {notes} | NOT_STARTED |")
-
-    # Tests section
+        lines += ["", "---", "", "## External Dependencies", "",
+                  "| Dependency | Purpose | Version / Notes | Status |",
+                  "|------------|---------|-----------------|--------|"]
+        for d in ext_deps:
+            lines.append(
+                f"| {d.get('name','')} | {d.get('purpose','')} "
+                f"| {d.get('version_or_notes','—')} | NOT_STARTED |")
     lines += [
-        "",
-        "---",
-        "",
-        "## Test Suites",
-        "",
+        "", "---", "", "## Test Suites", "",
         "| Test Suite | Pass | Fail | Last Run | Commit |",
         "|------------|------|------|----------|--------|",
         "| (no tests yet) | — | — | — | — |",
-        "",
-        "---",
-        "",
-        "## Git State",
-        f"- Current branch: main",
+        "", "---", "", "## Git State",
+        "- Current branch: main",
         "- Last push confirmed: (not yet pushed)",
-        "- Remote sync status: NOT_CONFIGURED",
-        "",
+        "- Remote sync status: NOT_CONFIGURED", "",
     ]
-
     return "\n".join(lines)
 
 
 def generate_must_read_md(data: dict) -> str:
-    """Generate MUST_READ.md for the first session."""
-
     first_tasks = data.get("first_session_tasks", [])
     phases = data.get("phases", [])
-    first_phase = phases[0] if phases else {"phase_number": 1, "phase_name": "Setup"}
-    tech_stack = data.get("tech_stack", [])
-    constraints = data.get("key_constraints", [])
-
-    # Format first session tasks as ATUs
-    task_lines = []
-    for i, task in enumerate(first_tasks[:5], 1):
-        task_lines.append(f"{i}. ATU-00{i}: {task} — SMALL")
-
-    if not task_lines:
-        task_lines = [
-            "1. ATU-001: Run verify_state.py and confirm clean baseline — SMALL",
-            "2. ATU-002: Set up Python environment and install dependencies — SMALL",
-            "3. ATU-003: Configure git remote and confirm push works — SMALL",
-        ]
-
+    fp = phases[0] if phases else {"phase_number": 1, "phase_name": "Setup"}
+    task_lines = [f"{i}. ATU-00{i}: {t} — SMALL"
+                  for i, t in enumerate(first_tasks[:5], 1)] or [
+        "1. ATU-001: Run verify_state.py and confirm clean baseline — SMALL",
+        "2. ATU-002: Set up Python environment and install dependencies — SMALL",
+        "3. ATU-003: Configure git remote and confirm push works — SMALL",
+    ]
     lines = [
         "# MUST READ — SESSION STARTUP BRIEF",
         f"**Last updated**: {NOW}",
         "**Updated by**: ACS Ingestion (auto-generated)",
-        "**Emergency flag**: NONE",
-        "",
-        "## ⚡ IMMEDIATE ACTIONS (do before anything else)",
+        "**Emergency flag**: NONE", "",
+        "## ⚡ IMMEDIATE ACTIONS",
         "1. Run: `python .claude/scripts/verify_state.py`",
-        "2. If verification fails: resolve discrepancies before ANY new work",
-        "3. Read CHECKPOINT.md if Emergency flag is set above",
-        "",
-        "---",
-        "",
+        "2. If verification fails: resolve before ANY new work",
+        "3. Read CHECKPOINT.md if Emergency flag is set", "",
+        "---", "",
         f"## Project: {data.get('project_name', 'Unknown')}",
-        data.get("project_description", ""),
-        "",
+        data.get("project_description", ""), "",
         "## Current Phase",
-        f"**Phase**: {first_phase.get('phase_number', 1)} — {first_phase.get('phase_name', 'Setup')}",
-        f"**Current Focus**: Project initialisation — ACS setup and environment verification",
-        "**Blocking Issues**: NONE",
-        "",
+        f"**Phase**: {fp.get('phase_number',1)} — {fp.get('phase_name','Setup')}",
+        "**Blocking Issues**: NONE", "",
         "## Last Verified Completion",
         "**ATU**: ATU-000 — ACS Protocol Initialised",
-        "**Commit**: (run `git log --oneline -1` to confirm)",
-        f"**Timestamp**: {NOW}",
-        "**Verification**: `python .claude/scripts/verify_state.py` → exit 0",
-        "",
+        f"**Timestamp**: {NOW}", "",
         "## THIS Session's Tasks (in order)",
-        "\n".join(task_lines),
-        "",
+        "\n".join(task_lines), "",
         "## Architecture Summary",
     ]
-
-    if tech_stack:
-        lines.append(f"- **Tech stack**: {', '.join(tech_stack)}")
-
-    env_notes = data.get("environment_notes", "")
-    if env_notes and env_notes != "Unknown":
-        lines.append(f"- **Environment**: {env_notes}")
-
-    branch_strategy = data.get("branch_strategy", "main / feature branches")
-    if branch_strategy and branch_strategy != "Unknown":
-        lines.append(f"- **Branch strategy**: {branch_strategy}")
-
-    if constraints:
-        lines.append("- **Key constraints**:")
-        for c in constraints[:3]:
-            lines.append(f"  - {c}")
-
+    if data.get("tech_stack"):
+        lines.append(f"- **Tech stack**: {', '.join(data['tech_stack'])}")
+    env = data.get("environment_notes", "")
+    if env and env != "Unknown":
+        lines.append(f"- **Environment**: {env}")
+    branch = data.get("branch_strategy", "")
+    if branch and branch != "Unknown":
+        lines.append(f"- **Branch strategy**: {branch}")
+    for c in data.get("key_constraints", [])[:3]:
+        lines.append(f"  - {c}")
     lines += [
-        "",
-        "## Active Environment Details",
-        f"- Python version: 3.11+",
-        "- Key services: (update when services are configured)",
-        "- Branch: main",
-        "- Key env vars needed: (update as discovered)",
-        "",
-        "## Do NOT Do This Session",
+        "", "## Do NOT Do This Session",
         "- Write any application code before ACS baseline is confirmed",
         "- Mark anything VERIFIED in STATE.md without a commit hash",
         "- Start a LARGE task without confirming sufficient session capacity",
     ]
-
     return "\n".join(lines)
 
 
 def generate_memory_md(data: dict) -> str:
-    """Generate MEMORY.md from architectural decisions and context."""
-
-    decisions = data.get("architectural_decisions", [])
-    ext_deps = data.get("external_dependencies", [])
-    tech_stack = data.get("tech_stack", [])
-
     lines = [
         "# PROJECT MEMORY — PERSISTENT CONTEXT",
         f"**Project**: {data.get('project_name', 'Unknown')}",
-        f"**Initialised**: {NOW}",
-        "",
-        "---",
-        "",
-        "## Architectural Decisions",
-        "",
+        f"**Initialised**: {NOW}", "", "---", "", "## Architectural Decisions", "",
         f"### {NOW}: ACS Protocol Adopted",
         "**Decision**: Using the Absolute Continuity System (ACS) for all session management.",
-        "**Rationale**: Enforces verification gates before marking anything complete. "
-        "Documentation is a side-effect of verified actions, not a substitute for them.",
-        "**Impact**: Every task requires a verify command + git log confirmation. "
-        "STATE.md updated only with real commit hashes.",
-        "",
+        "**Rationale**: Enforces verification gates before marking anything complete.",
+        "**Impact**: Every task requires verify command + git log confirmation.", "",
     ]
-
-    for dec in decisions:
-        title = dec.get("title", "Untitled Decision")
-        decision = dec.get("decision", "")
-        rationale = dec.get("rationale", "")
+    for dec in data.get("architectural_decisions", []):
         lines += [
-            f"### {NOW}: {title}",
-            f"**Decision**: {decision}",
-            f"**Rationale**: {rationale}",
-            "**Alternatives considered**: (document as they arise)",
-            "**Impact**: (document as understood)",
-            "",
+            f"### {NOW}: {dec.get('title','Untitled')}",
+            f"**Decision**: {dec.get('decision','')}",
+            f"**Rationale**: {dec.get('rationale','')}",
+            "**Alternatives considered**: (document as they arise)", "",
         ]
-
+    ext_deps = data.get("external_dependencies", [])
     lines += [
-        "---",
-        "",
-        "## Problems Encountered and Resolved",
-        "(None yet — add as they occur)",
-        "",
-        "---",
-        "",
-        "## External Dependencies",
-        "",
+        "---", "", "## Problems Encountered and Resolved",
+        "(None yet — add as they occur)", "", "---", "",
+        "## External Dependencies", "",
         "| Dependency | Version | Purpose | First encountered |",
         "|------------|---------|---------|-------------------|",
     ]
-
-    if ext_deps:
-        for dep in ext_deps:
-            name = dep.get("name", "Unknown")
-            purpose = dep.get("purpose", "")
-            notes = dep.get("version_or_notes", "—")
-            lines.append(f"| {name} | {notes} | {purpose} | {NOW} |")
-    else:
+    for d in ext_deps:
+        lines.append(
+            f"| {d.get('name','')} | {d.get('version_or_notes','—')} "
+            f"| {d.get('purpose','')} | {NOW} |")
+    if not ext_deps:
         lines.append("| (none yet) | — | — | — |")
-
     lines += [
-        "",
-        "---",
-        "",
-        "## Changed Understanding",
-        "(None yet — add when understanding of the codebase evolves)",
-        "",
-        "---",
-        "",
-        "## Performance Baselines",
-        "",
-        "| Metric | Baseline | Target | Current Best | Date |",
-        "|--------|----------|--------|--------------|------|",
-        "| (none yet) | — | — | — | — |",
-        "",
-        "---",
-        "",
-        "## Tech Stack Reference",
-        "",
+        "", "---", "", "## Tech Stack Reference", "",
     ]
-
-    if tech_stack:
-        for tech in tech_stack:
-            lines.append(f"- {tech}")
-    else:
-        lines.append("(to be documented as established)")
-
+    lines += [f"- {t}" for t in data.get("tech_stack", [])] or ["(to be documented)"]
     return "\n".join(lines)
 
 
-def generate_claude_md(data: dict) -> str:
-    """Generate CLAUDE.md for Claude Code auto-trigger."""
-
+def generate_agent_md(data: dict, acs_dir: str, agent_filename: str) -> str:
     project_name = data.get("project_name", "Unknown Project")
     project_desc = data.get("project_description", "")
-    tech_stack = data.get("tech_stack", [])
-    stack_str = ", ".join(tech_stack[:5]) if tech_stack else "see MEMORY.md"
-    phases = data.get("phases", [])
-    first_phase = phases[0] if phases else {"phase_number": 1, "phase_name": "Setup"}
+    tech_stack   = data.get("tech_stack", [])
+    stack_str    = ", ".join(tech_stack[:5]) or "see MEMORY.md"
+    phases       = data.get("phases", [])
+    fp           = phases[0] if phases else {"phase_number": 1, "phase_name": "Setup"}
 
-    return f"""# CLAUDE.md — ACS PROTOCOL TRIGGER
-# Keep this file under 100 lines. All detail lives in .claude/
+    return f"""# {agent_filename} — ACS PROTOCOL TRIGGER
+# Keep this file under 100 lines. All detail lives in {acs_dir}/
 
 ## ⚡ MANDATORY STARTUP — Do this before ANY other action
 
 ### Step 1: Run verification
 ```bash
-python .claude/scripts/verify_state.py
+python {acs_dir}/scripts/verify_state.py
 ```
 
 ### Step 2: Read session brief
-Read `.claude/MUST_READ.md` in full.
+Read `{acs_dir}/MUST_READ.md` in full.
 
-### Step 3: Your first response must confirm ALL of these:
-- [ ] Verification script result: exit 0 (clean) or exit 1 (discrepancies found)
+### Step 3: First response must confirm ALL of:
+- [ ] Verification result: exit 0 (clean) or exit 1 (discrepancies found)
 - [ ] Current git HEAD: output of `git log --oneline -1`
 - [ ] Last verified ATU: from STATE.md
-- [ ] CHECKPOINT.md status: clean / or recovery needed (describe)
+- [ ] CHECKPOINT.md status: clean / recovery needed
 - [ ] Planned tasks this session: from MUST_READ.md
 
 **Do not write any code until all five confirmations are in your response.**
@@ -558,8 +509,7 @@ Read `.claude/MUST_READ.md` in full.
 ## Project: {project_name}
 {project_desc}
 
-## Phase
-Phase {first_phase.get('phase_number', 1)} — {first_phase.get('phase_name', 'Setup')}
+## Phase {fp.get('phase_number', 1)} — {fp.get('phase_name', 'Setup')}
 
 ## Tech Stack
 {stack_str}
@@ -567,280 +517,212 @@ Phase {first_phase.get('phase_number', 1)} — {first_phase.get('phase_name', 'S
 ## ACS Document Map
 | Need | File |
 |------|------|
-| What to do this session | `.claude/MUST_READ.md` |
-| What is verified complete | `.claude/STATE.md` |
-| Architectural decisions | `.claude/MEMORY.md` |
-| Live session progress | `.claude/CHECKPOINT.md` |
-| Protocol quick reference | `.claude/PROTOCOL.md` |
-| Full protocol | `PROJECT_PROTOCOL_MASTER.md` |
+| What to do this session | `{acs_dir}/MUST_READ.md` |
+| What is verified complete | `{acs_dir}/STATE.md` |
+| Architectural decisions | `{acs_dir}/MEMORY.md` |
+| Live session progress | `{acs_dir}/CHECKPOINT.md` |
+| Protocol quick reference | `{acs_dir}/PROTOCOL.md` |
 
 ## Never Do Without Permission
 - Merge to main without all tests passing
 - Mark STATE.md VERIFIED without a commit hash
 - Start a LARGE task without a credit horizon check
-- End a session without updating MUST_READ.md for the next session
+- End a session without updating MUST_READ.md for next session
 """
 
 
 def generate_protocol_md() -> str:
-    """Generate the quick-reference PROTOCOL.md."""
     return """# ACS PROTOCOL — QUICK REFERENCE
-# Full protocol: PROJECT_PROTOCOL_MASTER.md
 
 ## Every Session Starts With:
-1. Read .claude/MUST_READ.md
-2. Read .claude/STATE.md
-3. Read .claude/CHECKPOINT.md (if it exists)
+1. Read MUST_READ.md
+2. Read STATE.md
+3. Read CHECKPOINT.md (if it exists)
 4. Run: python .claude/scripts/verify_state.py
 5. Resolve ALL discrepancies before writing any new code
 
-## A Task (ATU) is DONE When ALL of these are true:
-- [ ] Verify command was run and output matches expected
-- [ ] git commit was run with a standard message
-- [ ] git log --oneline -1 confirms the commit actually landed
+## A Task (ATU) is DONE When:
+- [ ] Verify command run and output matches expected
+- [ ] git commit run with standard message
+- [ ] git log --oneline -1 confirms commit landed
 - [ ] STATE.md updated with commit hash and timestamp
-- [ ] CHECKPOINT.md updated to show task as COMPLETE
+- [ ] CHECKPOINT.md updated to show task COMPLETE
 
 ## Never Say "Complete" Without:
-Running the verify command AND showing its actual output
-AND running git log --oneline -1 AND showing that output
+Running verify command AND showing actual output
+AND git log --oneline -1 AND showing that output.
 
-## Credit Check — Before MEDIUM or LARGE Tasks, State:
-"Task size: [SIZE]. Estimated time: [X min].
- Remaining session capacity: [assessment].
- Safe to start: YES/NO."
+## Credit Check (before MEDIUM or LARGE tasks):
+"Task size: [SIZE]. Estimated: [X min]. Capacity: [assessment]. Safe: YES/NO"
 
-## Session End Sequence (Planned):
-1. Complete current ATU fully — no half-finished tasks
-2. Update CHECKPOINT.md Status → COMPLETED
-3. Update STATE.md with all new verified completions
-4. Add session learnings to MEMORY.md
+## Session End (Planned):
+1. Complete current ATU fully
+2. Update CHECKPOINT.md → COMPLETED
+3. Update STATE.md with verified completions
+4. Add learnings to MEMORY.md
 5. Write next session's MUST_READ.md
-6. Run: git push && git status (must show clean working tree)
-7. Say in chat: "SESSION TERMINATION COMPLETE. Next session: ATU-[X]"
+6. git push && git status (clean working tree)
+7. Say: "SESSION TERMINATION COMPLETE. Next: ATU-[X]"
 
-## Emergency Session End (in priority order):
-1. git add -A && git commit -m "WIP: EMERGENCY [describe state]" && git push
+## Emergency End:
+1. git add -A && git commit -m "WIP: EMERGENCY [state]" && git push
 2. Append emergency block to CHECKPOINT.md
 3. Add WARNING flag to top of MUST_READ.md
 
 ## The Ten Golden Rules:
-1.  Verify before trusting — run verify_state.py first
-2.  Never claim complete — only show verification output
-3.  Commit hash or it didn't happen — git log confirms
+1.  Verify before trusting
+2.  Never claim complete — show verification output
+3.  Commit hash or it didn't happen
 4.  STATE.md = reality not intention
 5.  CHECKPOINT.md is live — update after every ATU
-6.  Check credit before large tasks — estimate first
-7.  80% rule — stop starting, finish cleanly
+6.  Check credit before large tasks
+7.  80% rule — finish cleanly
 8.  Emergency commit — always better than undocumented state
 9.  Partial is documented — never leave undocumented partial state
-10. MUST_READ.md written before this session ends
+10. MUST_READ.md written before session ends
 """
 
 
-# ── file writing with diff/confirm ───────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE WRITING
+# ══════════════════════════════════════════════════════════════════════════════
 
 def write_file_safe(path: Path, content: str, dry_run: bool, force: bool) -> bool:
-    """Write a file, showing diff if it exists. Returns True if written."""
     if path.exists() and not force:
-        existing = path.read_text(encoding="utf-8")
-        if existing == content:
+        if path.read_text(encoding="utf-8") == content:
             print(f"  UNCHANGED  {path}")
             return False
-        print(f"  MODIFIED   {path}  (file already exists)")
+        print(f"  MODIFIED   {path}  (already exists)")
         if not dry_run:
-            response = input(f"    Overwrite {path}? [y/N]: ").strip().lower()
-            if response != "y":
-                print(f"    Skipped.")
+            if input(f"    Overwrite {path}? [y/N]: ").strip().lower() != "y":
+                print("    Skipped.")
                 return False
-
     if dry_run:
         print(f"  DRY-RUN    Would write {path} ({len(content)} chars)")
         return False
-
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     print(f"  WRITTEN    {path}")
     return True
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ACS Planning Document Ingestion — auto-populate ACS documents "
-                    "from a BMAD doc, DevOps plan, product spec, or any project planning file."
-    )
-    parser.add_argument(
-        "--input", "-i",
-        nargs="+",
-        required=True,
-        metavar="FILE",
-        help="Input planning document(s). Supports .md, .txt, .docx"
-    )
-    parser.add_argument(
-        "--project-name", "-n",
-        default=None,
-        help="Override project name (otherwise extracted from document)"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be written without writing any files"
-    )
-    parser.add_argument(
-        "--force", "-f",
-        action="store_true",
-        help="Overwrite existing files without prompting"
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=".",
-        help="Project root directory (default: current directory)"
-    )
-    parser.add_argument(
-        "--api-key",
-        default=None,
-        help="Anthropic API key (default: ANTHROPIC_API_KEY env var)"
-    )
-    parser.add_argument(
-        "--skip-claude-md",
-        action="store_true",
-        help="Do not generate CLAUDE.md (if you manage it separately)"
-    )
-    parser.add_argument(
-        "--json-only",
-        action="store_true",
-        help="Only output the extracted JSON structure, do not write ACS files"
-    )
-
+        description="ACS Planning Document Ingestion — multi-provider LLM support.")
+    parser.add_argument("--input", "-i", nargs="+", required=True, metavar="FILE")
+    parser.add_argument("--provider", "-p", default="auto",
+                        choices=list(PROVIDERS) + ["auto"],
+                        help="LLM provider. Default: auto (detect from env vars)")
+    parser.add_argument("--model", "-m", default=None,
+                        help=f"Model override. Defaults: {DEFAULT_MODELS}")
+    parser.add_argument("--api-key", default=None,
+                        help="API key override (default: read from env var)")
+    parser.add_argument("--project-name", "-n", default=None,
+                        help="Override extracted project name")
+    parser.add_argument("--acs-dir", default=".claude",
+                        help="ACS directory (default: .claude). Use .acs for provider-neutral setup.")
+    parser.add_argument("--agent-file", default="CLAUDE.md",
+                        help="Agent trigger filename (default: CLAUDE.md). Use AGENT.md for neutral setup.")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force", "-f", action="store_true")
+    parser.add_argument("--output-dir", default=".")
+    parser.add_argument("--skip-agent-file", action="store_true")
+    parser.add_argument("--json-only", action="store_true",
+                        help="Print extracted JSON only, do not write files")
     args = parser.parse_args()
 
-    # ── resolve API key ───────────────────────────────────────────────────────
-    api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        # Try loading from .env
-        env_file = Path(args.output_dir) / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY not set.")
-        print("Set it as an environment variable or pass --api-key")
-        sys.exit(1)
-
-    # ── read input files ──────────────────────────────────────────────────────
     print("\nACS Document Ingestion")
     print("=" * 60)
-    print(f"Reading input files...")
 
-    combined_content = []
-    for file_path_str in args.input:
-        file_path = Path(file_path_str)
-        if not file_path.exists():
-            print(f"  ERROR: File not found: {file_path}")
+    resolved_provider, api_key = resolve_provider(args.provider, args.api_key)
+    model = args.model or DEFAULT_MODELS[resolved_provider]
+    client = PROVIDERS[resolved_provider](api_key=api_key, model=model)
+    print(f"  Provider:  {resolved_provider}")
+    print(f"  Model:     {client.model}")
+
+    print("\nReading input files...")
+    combined = []
+    for f in args.input:
+        p = Path(f)
+        if not p.exists():
+            print(f"  ERROR: Not found: {p}")
             sys.exit(1)
-        print(f"  Reading: {file_path} ({file_path.stat().st_size // 1024}KB)")
-        content = read_input_file(file_path)
-        if content:
-            combined_content.append(f"\n\n--- SOURCE: {file_path.name} ---\n\n{content}")
+        print(f"  Reading:   {p} ({p.stat().st_size // 1024}KB)")
+        text = read_input_file(p)
+        if text:
+            combined.append(f"\n\n--- SOURCE: {p.name} ---\n\n{text}")
 
-    if not combined_content:
-        print("ERROR: No readable content found in input files.")
+    if not combined:
+        print("ERROR: No readable content found.")
         sys.exit(1)
 
-    full_document = "\n".join(combined_content)
-    print(f"  Total content: {len(full_document):,} characters from {len(combined_content)} file(s)")
+    full_doc = "\n".join(combined)
+    print(f"  Total:     {len(full_doc):,} chars from {len(combined)} file(s)")
 
-    # ── extract structure via Claude API ─────────────────────────────────────
     print("\nExtracting project structure...")
-    data = extract_structure(full_document, api_key)
-
-    # Override project name if provided
+    data = extract_structure(full_doc, client)
     if args.project_name:
         data["project_name"] = args.project_name
 
-    print(f"  Project: {data.get('project_name', 'Unknown')}")
-    print(f"  Phases: {len(data.get('phases', []))}")
-    print(f"  Milestones: {len(data.get('milestones', []))}")
-    print(f"  Architectural decisions: {len(data.get('architectural_decisions', []))}")
-    print(f"  External dependencies: {len(data.get('external_dependencies', []))}")
+    print(f"  Project:         {data.get('project_name', 'Unknown')}")
+    print(f"  Phases:          {len(data.get('phases', []))}")
+    print(f"  Milestones:      {len(data.get('milestones', []))}")
+    print(f"  Arch decisions:  {len(data.get('architectural_decisions', []))}")
+    print(f"  External deps:   {len(data.get('external_dependencies', []))}")
 
     if args.json_only:
-        print("\nExtracted JSON structure:")
         print(json.dumps(data, indent=2))
         return
 
-    # ── generate and write ACS documents ─────────────────────────────────────
     output_root = Path(args.output_dir)
-    claude_dir = output_root / ".claude"
-    scripts_dir = claude_dir / "scripts"
+    acs_dir     = output_root / args.acs_dir
 
-    print(f"\nGenerating ACS documents in: {output_root.resolve()}")
+    print(f"\nGenerating ACS documents → {output_root.resolve()}")
+    print(f"  ACS dir:   {args.acs_dir}/")
+    print(f"  Agent file: {args.agent_file}")
     if args.dry_run:
-        print("  (DRY RUN — no files will be written)")
+        print("  (DRY RUN)")
     print()
 
     written = []
+    for fname, gen in [
+        ("STATE.md",    generate_state_md(data)),
+        ("MUST_READ.md", generate_must_read_md(data)),
+        ("MEMORY.md",   generate_memory_md(data)),
+        ("PROTOCOL.md", generate_protocol_md()),
+    ]:
+        if write_file_safe(acs_dir / fname, gen, args.dry_run, args.force):
+            written.append(fname)
 
-    # STATE.md
-    state_content = generate_state_md(data)
-    if write_file_safe(claude_dir / "STATE.md", state_content, args.dry_run, args.force):
-        written.append("STATE.md")
+    if not args.skip_agent_file:
+        agent_content = generate_agent_md(data, args.acs_dir, args.agent_file)
+        if write_file_safe(output_root / args.agent_file, agent_content,
+                           args.dry_run, args.force):
+            written.append(args.agent_file)
 
-    # MUST_READ.md
-    must_read_content = generate_must_read_md(data)
-    if write_file_safe(claude_dir / "MUST_READ.md", must_read_content, args.dry_run, args.force):
-        written.append("MUST_READ.md")
-
-    # MEMORY.md
-    memory_content = generate_memory_md(data)
-    if write_file_safe(claude_dir / "MEMORY.md", memory_content, args.dry_run, args.force):
-        written.append("MEMORY.md")
-
-    # PROTOCOL.md
-    protocol_content = generate_protocol_md()
-    if write_file_safe(claude_dir / "PROTOCOL.md", protocol_content, args.dry_run, args.force):
-        written.append("PROTOCOL.md")
-
-    # CLAUDE.md (project root)
-    if not args.skip_claude_md:
-        claude_md_content = generate_claude_md(data)
-        if write_file_safe(output_root / "CLAUDE.md", claude_md_content, args.dry_run, args.force):
-            written.append("CLAUDE.md")
-
-    # Ensure scripts directory exists
     if not args.dry_run:
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save extracted JSON for reference
-    json_path = claude_dir / "ingestion_result.json"
-    if not args.dry_run:
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(json.dumps(data, indent=2))
-        print(f"  WRITTEN    {json_path}  (extracted structure for reference)")
+        (acs_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        jp = acs_dir / "ingestion_result.json"
+        jp.write_text(json.dumps(data, indent=2))
+        print(f"  WRITTEN    {jp}")
         written.append("ingestion_result.json")
 
-    # ── summary ───────────────────────────────────────────────────────────────
     print()
     print("=" * 60)
     if args.dry_run:
-        print("DRY RUN COMPLETE — no files were written")
+        print("DRY RUN COMPLETE — no files written")
     else:
         print(f"INGESTION COMPLETE — {len(written)} files written")
-        print()
-        milestones = data.get("milestones", [])
-        print(f"  STATE.md populated with {len(milestones)} milestones (all NOT_STARTED)")
-        print()
-        print("NEXT STEPS:")
-        print("  1. Review .claude/STATE.md — confirm all milestones are captured")
-        print("  2. Review .claude/MUST_READ.md — adjust first session tasks if needed")
-        print("  3. Place verify_state.py in .claude/scripts/ if not already there")
-        print("  4. Run: python .claude/scripts/verify_state.py")
-        print("  5. Commit all ACS files: git add .claude/ CLAUDE.md && git commit")
-        print("  6. Start your first session")
+        print(f"\n  {len(data.get('milestones',[]))} milestones added to STATE.md (all NOT_STARTED)")
+        print(f"\nNEXT STEPS:")
+        print(f"  1. Review {args.acs_dir}/STATE.md")
+        print(f"  2. Review {args.acs_dir}/MUST_READ.md")
+        print(f"  3. python {args.acs_dir}/scripts/verify_state.py")
+        print(f"  4. git add {args.acs_dir}/ {args.agent_file} && git commit")
     print("=" * 60)
 
 
