@@ -7,8 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read        # Minimum needed — read repo only
-  security-events: write  # Needed for Gitleaks to report findings
+  contents: read
 
 jobs:
   # ── Job 1: Verify all scripts are syntactically valid ──────────────────────
