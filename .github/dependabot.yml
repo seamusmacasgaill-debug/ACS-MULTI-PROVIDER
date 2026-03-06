@@ -1,24 +1,11 @@
 version: 2
 updates:
-  # Python dependencies (anthropic, python-docx)
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "security"
-
-  # GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "github-actions"
+    ignore:
+      - dependency-name: "actions/checkout"
+        versions: [">=5"]
+      - dependency-name: "actions/setup-python"
+        versions: [">=6"]
