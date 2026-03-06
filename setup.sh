@@ -193,7 +193,7 @@ if [[ -f "$INIT_SCRIPT" ]]; then
     FORCE_FLAG=""
     [[ "$FORCE" == true ]] && FORCE_FLAG="--force"
     DRY_FLAG=""
-    [[ "$DRY_RUN" == true ]] && DRY_FLAG="--dry-run"
+    # DRY_FLAG removed — dry-run passed directly to acs_ingest.py
 
     if [[ "$DRY_RUN" == false ]]; then
         bash "$INIT_SCRIPT" "$PROJECT_NAME" "$PROJECT_DESC" $FORCE_FLAG
@@ -342,7 +342,7 @@ if [[ ${#INPUT_FILES[@]} -gt 0 ]] && [[ "$SKIP_INGEST" == false ]]; then
                 INGEST_ARGS=("--input" "${INPUT_FILES[@]}")
                 [[ "$FORCE" == true ]]   && INGEST_ARGS+=("--force")
                 [[ "$DRY_RUN" == true ]] && INGEST_ARGS+=("--dry-run")
-                [[ -n "$INGEST_API_ARG" ]] && INGEST_ARGS+=($INGEST_API_ARG)
+                [[ -n "$INGEST_API_ARG" ]] && IFS=" " read -r -a _api_arg <<< "$INGEST_API_ARG" && INGEST_ARGS+=("${_api_arg[@]}")
 
                 info "Running: python .claude/scripts/acs_ingest.py ${INGEST_ARGS[*]}"
                 "$PYTHON" "$SCRIPTS_DEST/acs_ingest.py" "${INGEST_ARGS[@]}"
