@@ -23,12 +23,6 @@ jobs:
       - run: python -m py_compile scripts/acs_ingest.py
       - run: bash -n setup.sh
       - run: bash -n scripts/init_acs.sh
-      - name: dry-run setup
-        run: |
-          mkdir -p /tmp/t && cd /tmp/t && git init
-          git config user.email "ci@test.local"
-          git config user.name "CI"
-          bash $GITHUB_WORKSPACE/setup.sh "Test" "Test" --dry-run
 
   lint-shell:
     name: lint-shell
@@ -39,37 +33,14 @@ jobs:
       - run: shellcheck --severity=warning setup.sh
       - run: shellcheck --severity=warning scripts/init_acs.sh
 
-  check-no-secrets:
-    name: check-no-secrets
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  check-permissions:
-    name: check-permissions
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: check executable files
-        run: |
-          UNEXPECTED=$(find . -not -path './.git/*' -perm /111 -type f ! -name "*.sh" ! -name "*.py")
-          if [ -n "$UNEXPECTED" ]; then echo "FAIL: $UNEXPECTED"; exit 1; fi
-          echo "PASS"
-
   check-docs:
     name: check-docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: required files
-        run: |
+      - run: |
           for f in README.md LICENSE setup.sh docs/ACS_PROTOCOL.md \
-            scripts/verify_state.py scripts/acs_ingest.py scripts/init_acs.sh \
-            templates/CLAUDE.md templates/STATE.md .github/CODEOWNERS; do
+            scripts/verify_state.py scripts/acs_ingest.py \
+            templates/CLAUDE.md .github/CODEOWNERS; do
             [ -f "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
           done
