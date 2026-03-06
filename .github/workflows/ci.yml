@@ -1,14 +1,11 @@
 name: ACS CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
 permissions:
   contents: read
-
 jobs:
   verify-scripts:
     name: verify-scripts
@@ -23,7 +20,6 @@ jobs:
       - run: python -m py_compile scripts/acs_ingest.py
       - run: bash -n setup.sh
       - run: bash -n scripts/init_acs.sh
-
   lint-shell:
     name: lint-shell
     runs-on: ubuntu-latest
@@ -32,7 +28,6 @@ jobs:
       - run: sudo apt-get install -y shellcheck
       - run: shellcheck --severity=warning setup.sh
       - run: shellcheck --severity=warning scripts/init_acs.sh
-
   check-docs:
     name: check-docs
     runs-on: ubuntu-latest
@@ -41,6 +36,6 @@ jobs:
       - run: |
           for f in README.md LICENSE setup.sh docs/ACS_PROTOCOL.md \
             scripts/verify_state.py scripts/acs_ingest.py \
-            templates/AGENT.md .github/CODEOWNERS; do
+            templates/CLAUDE.md .github/CODEOWNERS; do
             [ -f "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
           done
