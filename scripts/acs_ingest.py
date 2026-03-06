@@ -30,7 +30,7 @@ Usage:
   python acs_ingest.py --input plan.md --acs-dir .acs --agent-file AGENT.md
 
 Auto-detection priority (--provider auto):
-  ANTHROPIC_API_KEY → openai: OPENAI_API_KEY → gemini: GEMINI_API_KEY → ollama
+  ANTHROPIC_API_KEY -> openai: OPENAI_API_KEY -> gemini: GEMINI_API_KEY -> ollama
 """
 
 import argparse
@@ -42,7 +42,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── optional imports ──────────────────────────────────────────────────────────
+# optional imports
 try:
     from docx import Document as DocxDocument
     DOCX_AVAILABLE = True
@@ -61,11 +61,11 @@ DEFAULT_MODELS = {
 EXTRACTION_PROMPT = """You are reading a software project planning document.
 Extract structured information to populate an ACS project tracking setup.
 
-Return ONLY valid JSON — no explanation, no markdown fences, no preamble:
+Return ONLY valid JSON -- no explanation, no markdown fences, no preamble:
 
 {{
   "project_name": "string",
-  "project_description": "string — 1-2 sentences",
+  "project_description": "string -- 1-2 sentences",
   "tech_stack": ["list", "of", "technologies"],
   "phases": [
     {{"phase_number": 1, "phase_name": "string", "phase_description": "string"}}
@@ -91,7 +91,7 @@ Return ONLY valid JSON — no explanation, no markdown fences, no preamble:
     {{"name": "string", "purpose": "string", "version_or_notes": "string"}}
   ],
   "key_constraints": ["string"],
-  "first_session_tasks": ["string — first 3-5 things to do, in order"],
+  "first_session_tasks": ["string -- first 3-5 things to do, in order"],
   "branch_strategy": "string",
   "environment_notes": "string"
 }}
@@ -110,25 +110,23 @@ Document:
 ---"""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # LLM CLIENT ABSTRACTION
-# ══════════════════════════════════════════════════════════════════════════════
 
 class LLMClient(ABC):
-    def __init__(self, api_key: str | None, model: str):
+    def __init__(self, api_key, model):
         self.api_key = api_key
         self.model = model
 
     @abstractmethod
-    def complete(self, prompt: str, max_tokens: int = 4000) -> str: ...
+    def complete(self, prompt, max_tokens=4000): ...
 
     @classmethod
     @abstractmethod
-    def provider_name(cls) -> str: ...
+    def provider_name(cls): ...
 
     @classmethod
     @abstractmethod
-    def env_var(cls) -> str | None: ...
+    def env_var(cls): ...
 
 
 class AnthropicClient(LLMClient):
@@ -195,7 +193,7 @@ class GeminiClient(LLMClient):
 
 
 class OllamaClient(LLMClient):
-    """Local Ollama — no API key required."""
+    """Local Ollama -- no API key required."""
     @classmethod
     def provider_name(cls): return "ollama"
     @classmethod
@@ -220,7 +218,7 @@ def _die(pkg, install_cmd):
     sys.exit(1)
 
 
-PROVIDERS: dict[str, type[LLMClient]] = {
+PROVIDERS = {
     "anthropic": AnthropicClient,
     "openai":    OpenAIClient,
     "gemini":    GeminiClient,
@@ -228,8 +226,7 @@ PROVIDERS: dict[str, type[LLMClient]] = {
 }
 
 
-def resolve_provider(provider: str, api_key_override: str | None) -> tuple[str, str | None]:
-    """Returns (resolved_provider_name, api_key)."""
+def resolve_provider(provider, api_key_override):
     if provider == "auto":
         for name in ["anthropic", "openai", "gemini"]:
             env = PROVIDERS[name].env_var()
@@ -238,7 +235,7 @@ def resolve_provider(provider: str, api_key_override: str | None) -> tuple[str, 
                 provider = name
                 break
         else:
-            print("  No API key env vars found — falling back to ollama (local)")
+            print("  No API key env vars found -- falling back to ollama (local)")
             provider = "ollama"
 
     if provider not in PROVIDERS:
@@ -248,7 +245,6 @@ def resolve_provider(provider: str, api_key_override: str | None) -> tuple[str, 
     env_var = PROVIDERS[provider].env_var()
     api_key = api_key_override or (os.environ.get(env_var) if env_var else None)
 
-    # Try .env file
     if api_key is None and env_var:
         env_file = Path(".env")
         if env_file.exists():
@@ -264,14 +260,12 @@ def resolve_provider(provider: str, api_key_override: str | None) -> tuple[str, 
     return provider, api_key
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # DOCUMENT READERS
-# ══════════════════════════════════════════════════════════════════════════════
 
-def read_input_file(path: Path) -> str:
+def read_input_file(path):
     if path.suffix.lower() == ".docx":
         if not DOCX_AVAILABLE:
-            print(f"ERROR: python-docx not installed.\nRun: pip install python-docx")
+            print("ERROR: python-docx not installed.\nRun: pip install python-docx")
             sys.exit(1)
         doc = DocxDocument(str(path))
         parts = []
@@ -287,15 +281,13 @@ def read_input_file(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except Exception:
-        print(f"WARNING: Cannot read {path} — skipping.")
+        print(f"WARNING: Cannot read {path} -- skipping.")
         return ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # EXTRACTION
-# ══════════════════════════════════════════════════════════════════════════════
 
-def extract_structure(document_content: str, client: LLMClient) -> dict:
+def extract_structure(document_content, client):
     print(f"  Analysing with {client.provider_name()} / {client.model} ...")
     raw = client.complete(
         EXTRACTION_PROMPT.format(document_content=document_content[:50000]))
@@ -309,22 +301,20 @@ def extract_structure(document_content: str, client: LLMClient) -> dict:
         sys.exit(1)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # DOCUMENT GENERATORS
-# ══════════════════════════════════════════════════════════════════════════════
 
-def generate_state_md(data: dict) -> str:
+def generate_state_md(data):
     milestones  = data.get("milestones", [])
     phases      = data.get("phases", [])
     phase_names = {p["phase_number"]: p["phase_name"] for p in phases}
 
-    by_phase: dict = {}
+    by_phase = {}
     for m in milestones:
         by_phase.setdefault(m.get("phase", 1), {}).setdefault(
             m.get("category", "Other"), []).append(m)
 
     lines = [
-        "# PROJECT STATE — VERIFIED COMPLETIONS ONLY",
+        "# PROJECT STATE -- VERIFIED COMPLETIONS ONLY",
         "**Rule**: Nothing is added here without a verified commit hash.",
         f"**Last verification run**: {NOW}",
         f"**Project**: {data.get('project_name', 'Unknown')}",
@@ -332,11 +322,11 @@ def generate_state_md(data: dict) -> str:
         "", "---", "",
         "## LEGEND",
         "| Status | Meaning |", "|--------|---------|",
-        "| `VERIFIED` | Confirmed — commit hash and test evidence recorded |",
+        "| `VERIFIED` | Confirmed -- commit hash and test evidence recorded |",
         "| `IN_PROGRESS` | Currently being built this session |",
-        "| `PARTIAL` | Started but not complete — see CHECKPOINT.md |",
+        "| `PARTIAL` | Started but not complete -- see CHECKPOINT.md |",
         "| `NOT_STARTED` | On the roadmap but not yet begun |",
-        "| `BLOCKED` | Cannot proceed — blocker in MUST_READ.md |",
+        "| `BLOCKED` | Cannot proceed -- blocker in MUST_READ.md |",
         "", "---", "",
     ]
 
@@ -350,7 +340,7 @@ def generate_state_md(data: dict) -> str:
             for m in items:
                 lines.append(
                     f"| {m.get('id','M-???')} | {m.get('name','Unknown')[:50]} "
-                    f"| {m.get('size','MEDIUM')} | NOT_STARTED | — | — |")
+                    f"| {m.get('size','MEDIUM')} | NOT_STARTED | -- | -- |")
                 if m.get("description"):
                     lines.append(f"| | *{m['description'][:80]}* | | | | |")
             lines.append("")
@@ -362,7 +352,7 @@ def generate_state_md(data: dict) -> str:
         "|-----------|--------|--------|--------------------|",
         f"| Git repository | VERIFIED | (initial) | {NOW} |",
         f"| ACS Protocol files | VERIFIED | (initial) | {NOW} |",
-        "| Python environment | NOT_STARTED | — | — |",
+        "| Python environment | NOT_STARTED | -- | -- |",
     ]
     if ext_deps:
         lines += ["", "---", "", "## External Dependencies", "",
@@ -371,12 +361,12 @@ def generate_state_md(data: dict) -> str:
         for d in ext_deps:
             lines.append(
                 f"| {d.get('name','')} | {d.get('purpose','')} "
-                f"| {d.get('version_or_notes','—')} | NOT_STARTED |")
+                f"| {d.get('version_or_notes','--')} | NOT_STARTED |")
     lines += [
         "", "---", "", "## Test Suites", "",
         "| Test Suite | Pass | Fail | Last Run | Commit |",
         "|------------|------|------|----------|--------|",
-        "| (no tests yet) | — | — | — | — |",
+        "| (no tests yet) | -- | -- | -- | -- |",
         "", "---", "", "## Git State",
         "- Current branch: main",
         "- Last push confirmed: (not yet pushed)",
@@ -385,22 +375,22 @@ def generate_state_md(data: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_must_read_md(data: dict) -> str:
+def generate_must_read_md(data):
     first_tasks = data.get("first_session_tasks", [])
     phases = data.get("phases", [])
     fp = phases[0] if phases else {"phase_number": 1, "phase_name": "Setup"}
-    task_lines = [f"{i}. ATU-00{i}: {t} — SMALL"
+    task_lines = [f"{i}. ATU-00{i}: {t} -- SMALL"
                   for i, t in enumerate(first_tasks[:5], 1)] or [
-        "1. ATU-001: Run verify_state.py and confirm clean baseline — SMALL",
-        "2. ATU-002: Set up Python environment and install dependencies — SMALL",
-        "3. ATU-003: Configure git remote and confirm push works — SMALL",
+        "1. ATU-001: Run verify_state.py and confirm clean baseline -- SMALL",
+        "2. ATU-002: Set up Python environment and install dependencies -- SMALL",
+        "3. ATU-003: Configure git remote and confirm push works -- SMALL",
     ]
     lines = [
-        "# MUST READ — SESSION STARTUP BRIEF",
+        "# MUST READ -- SESSION STARTUP BRIEF",
         f"**Last updated**: {NOW}",
         "**Updated by**: ACS Ingestion (auto-generated)",
         "**Emergency flag**: NONE", "",
-        "## ⚡ IMMEDIATE ACTIONS",
+        "## IMMEDIATE ACTIONS",
         "1. Run: `python .claude/scripts/verify_state.py`",
         "2. If verification fails: resolve before ANY new work",
         "3. Read CHECKPOINT.md if Emergency flag is set", "",
@@ -408,10 +398,10 @@ def generate_must_read_md(data: dict) -> str:
         f"## Project: {data.get('project_name', 'Unknown')}",
         data.get("project_description", ""), "",
         "## Current Phase",
-        f"**Phase**: {fp.get('phase_number',1)} — {fp.get('phase_name','Setup')}",
+        f"**Phase**: {fp.get('phase_number',1)} -- {fp.get('phase_name','Setup')}",
         "**Blocking Issues**: NONE", "",
         "## Last Verified Completion",
-        "**ATU**: ATU-000 — ACS Protocol Initialised",
+        "**ATU**: ATU-000 -- ACS Protocol Initialised",
         f"**Timestamp**: {NOW}", "",
         "## THIS Session's Tasks (in order)",
         "\n".join(task_lines), "",
@@ -436,9 +426,9 @@ def generate_must_read_md(data: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_memory_md(data: dict) -> str:
+def generate_memory_md(data):
     lines = [
-        "# PROJECT MEMORY — PERSISTENT CONTEXT",
+        "# PROJECT MEMORY -- PERSISTENT CONTEXT",
         f"**Project**: {data.get('project_name', 'Unknown')}",
         f"**Initialised**: {NOW}", "", "---", "", "## Architectural Decisions", "",
         f"### {NOW}: ACS Protocol Adopted",
@@ -456,25 +446,23 @@ def generate_memory_md(data: dict) -> str:
     ext_deps = data.get("external_dependencies", [])
     lines += [
         "---", "", "## Problems Encountered and Resolved",
-        "(None yet — add as they occur)", "", "---", "",
+        "(None yet -- add as they occur)", "", "---", "",
         "## External Dependencies", "",
         "| Dependency | Version | Purpose | First encountered |",
         "|------------|---------|---------|-------------------|",
     ]
     for d in ext_deps:
         lines.append(
-            f"| {d.get('name','')} | {d.get('version_or_notes','—')} "
+            f"| {d.get('name','')} | {d.get('version_or_notes','--')} "
             f"| {d.get('purpose','')} | {NOW} |")
     if not ext_deps:
-        lines.append("| (none yet) | — | — | — |")
-    lines += [
-        "", "---", "", "## Tech Stack Reference", "",
-    ]
+        lines.append("| (none yet) | -- | -- | -- |")
+    lines += ["", "---", "", "## Tech Stack Reference", ""]
     lines += [f"- {t}" for t in data.get("tech_stack", [])] or ["(to be documented)"]
     return "\n".join(lines)
 
 
-def generate_agent_md(data: dict, acs_dir: str, agent_filename: str) -> str:
+def generate_agent_md(data, acs_dir, agent_filename):
     project_name = data.get("project_name", "Unknown Project")
     project_desc = data.get("project_description", "")
     tech_stack   = data.get("tech_stack", [])
@@ -482,10 +470,10 @@ def generate_agent_md(data: dict, acs_dir: str, agent_filename: str) -> str:
     phases       = data.get("phases", [])
     fp           = phases[0] if phases else {"phase_number": 1, "phase_name": "Setup"}
 
-    return f"""# {agent_filename} — ACS PROTOCOL TRIGGER
+    return f"""# {agent_filename} -- ACS PROTOCOL TRIGGER
 # Keep this file under 100 lines. All detail lives in {acs_dir}/
 
-## ⚡ MANDATORY STARTUP — Do this before ANY other action
+## MANDATORY STARTUP -- Do this before ANY other action
 
 ### Step 1: Run verification
 ```bash
@@ -509,7 +497,7 @@ Read `{acs_dir}/MUST_READ.md` in full.
 ## Project: {project_name}
 {project_desc}
 
-## Phase {fp.get('phase_number', 1)} — {fp.get('phase_name', 'Setup')}
+## Phase {fp.get('phase_number', 1)} -- {fp.get('phase_name', 'Setup')}
 
 ## Tech Stack
 {stack_str}
@@ -531,8 +519,8 @@ Read `{acs_dir}/MUST_READ.md` in full.
 """
 
 
-def generate_protocol_md() -> str:
-    return """# ACS PROTOCOL — QUICK REFERENCE
+def generate_protocol_md():
+    return """# ACS PROTOCOL -- QUICK REFERENCE
 
 ## Every Session Starts With:
 1. Read MUST_READ.md
@@ -557,7 +545,7 @@ AND git log --oneline -1 AND showing that output.
 
 ## Session End (Planned):
 1. Complete current ATU fully
-2. Update CHECKPOINT.md → COMPLETED
+2. Update CHECKPOINT.md -> COMPLETED
 3. Update STATE.md with verified completions
 4. Add learnings to MEMORY.md
 5. Write next session's MUST_READ.md
@@ -571,23 +559,21 @@ AND git log --oneline -1 AND showing that output.
 
 ## The Ten Golden Rules:
 1.  Verify before trusting
-2.  Never claim complete — show verification output
+2.  Never claim complete -- show verification output
 3.  Commit hash or it didn't happen
 4.  STATE.md = reality not intention
-5.  CHECKPOINT.md is live — update after every ATU
+5.  CHECKPOINT.md is live -- update after every ATU
 6.  Check credit before large tasks
-7.  80% rule — finish cleanly
-8.  Emergency commit — always better than undocumented state
-9.  Partial is documented — never leave undocumented partial state
+7.  80% rule -- finish cleanly
+8.  Emergency commit -- always better than undocumented state
+9.  Partial is documented -- never leave undocumented partial state
 10. MUST_READ.md written before session ends
 """
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # FILE WRITING
-# ══════════════════════════════════════════════════════════════════════════════
 
-def write_file_safe(path: Path, content: str, dry_run: bool, force: bool) -> bool:
+def write_file_safe(path, content, dry_run, force):
     if path.exists() and not force:
         if path.read_text(encoding="utf-8") == content:
             print(f"  UNCHANGED  {path}")
@@ -606,13 +592,11 @@ def write_file_safe(path: Path, content: str, dry_run: bool, force: bool) -> boo
     return True
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(
-        description="ACS Planning Document Ingestion — multi-provider LLM support.")
+        description="ACS Planning Document Ingestion -- multi-provider LLM support.")
     parser.add_argument("--input", "-i", nargs="+", required=True, metavar="FILE")
     parser.add_argument("--provider", "-p", default="auto",
                         choices=list(PROVIDERS) + ["auto"],
@@ -681,8 +665,8 @@ def main():
     output_root = Path(args.output_dir)
     acs_dir     = output_root / args.acs_dir
 
-    print(f"\nGenerating ACS documents → {output_root.resolve()}")
-    print(f"  ACS dir:   {args.acs_dir}/")
+    print(f"\nGenerating ACS documents -> {output_root.resolve()}")
+    print(f"  ACS dir:    {args.acs_dir}/")
     print(f"  Agent file: {args.agent_file}")
     if args.dry_run:
         print("  (DRY RUN)")
@@ -690,10 +674,10 @@ def main():
 
     written = []
     for fname, gen in [
-        ("STATE.md",    generate_state_md(data)),
+        ("STATE.md",     generate_state_md(data)),
         ("MUST_READ.md", generate_must_read_md(data)),
-        ("MEMORY.md",   generate_memory_md(data)),
-        ("PROTOCOL.md", generate_protocol_md()),
+        ("MEMORY.md",    generate_memory_md(data)),
+        ("PROTOCOL.md",  generate_protocol_md()),
     ]:
         if write_file_safe(acs_dir / fname, gen, args.dry_run, args.force):
             written.append(fname)
@@ -714,9 +698,9 @@ def main():
     print()
     print("=" * 60)
     if args.dry_run:
-        print("DRY RUN COMPLETE — no files written")
+        print("DRY RUN COMPLETE -- no files written")
     else:
-        print(f"INGESTION COMPLETE — {len(written)} files written")
+        print(f"INGESTION COMPLETE -- {len(written)} files written")
         print(f"\n  {len(data.get('milestones',[]))} milestones added to STATE.md (all NOT_STARTED)")
         print(f"\nNEXT STEPS:")
         print(f"  1. Review {args.acs_dir}/STATE.md")
