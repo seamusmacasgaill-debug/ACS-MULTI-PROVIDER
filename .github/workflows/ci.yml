@@ -36,6 +36,6 @@ jobs:
       - run: |
           for f in README.md LICENSE setup.sh docs/ACS_PROTOCOL.md \
             scripts/verify_state.py scripts/acs_ingest.py \
-            templates/CLAUDE.md .github/CODEOWNERS; do
+            templates/AGENT.md .github/CODEOWNERS; do
             [ -f "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
           done
