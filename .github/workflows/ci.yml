@@ -11,7 +11,7 @@ jobs:
     name: verify-scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -24,7 +24,7 @@ jobs:
     name: lint-shell
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: sudo apt-get install -y shellcheck
       - run: shellcheck --severity=warning setup.sh
       - run: shellcheck --severity=warning scripts/init_acs.sh
@@ -32,7 +32,7 @@ jobs:
     name: check-docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: |
           for f in README.md LICENSE setup.sh docs/ACS_PROTOCOL.md \
             scripts/verify_state.py scripts/acs_ingest.py \
