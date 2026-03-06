@@ -4,19 +4,19 @@
 # Format: pattern  @username
 
 # Default owner for everything
-*                           @yourusername
+*                           @seamusmacasgaill-debug
 
 # Scripts — highest security sensitivity
 # Any PR touching these files requires owner review
-/scripts/                   @yourusername
-/setup.sh                   @yourusername
+/scripts/                   @seamusmacasgaill-debug
+/setup.sh                   @seamusmacasgaill-debug
 
 # Templates — changes affect all users who run setup.sh
-/templates/                 @yourusername
+/templates/                 @seamusmacasgaill-debug
 
 # Security and governance documents
-/SECURITY.md                @yourusername
-/.github/                   @yourusername
+/SECURITY.md                @seamusmacasgaill-debug
+/.github/                   @seamusmacasgaill-debug
 
 # Documentation
-/docs/                      @yourusername
+/docs/                      @seamusmacasgaill-debug
