@@ -26,10 +26,16 @@ ACS repo (source of truth for tooling):
   ~/GitHub/ACS/acs-repo/
     hooks/acs-contract-check.sh        Canonical hook script (copied to ~/.claude/hooks/)
     scripts/install_global.sh          Machine-level install
-    scripts/init_project.sh            Per-project init (creates .acs/contract.json)
+    scripts/init_project.sh            Per-project init (creates .acs/contract.json, offers starter selection)
     scripts/init_acs.sh                Per-project session docs init
     scripts/verify_state.py            State verification
-    templates/contract.json            Template for .acs/contract.json
+    templates/contract.json            Blank template for .acs/contract.json
+    templates/contracts/               Pre-built starter contracts (one per common project type)
+      nextjs-web-app.json              Next.js app with auth, email, billing, DB
+      stripe-integration.json          Any project with Stripe payments
+      html-css-pipeline.json           HTML/CSS generation with post-processors
+      database-schema.json             Prisma/Drizzle schema + migrations
+      auth-email.json                  Magic link / token-based auth
     docs/ACS_V2_ARCHITECTURE.md        Architecture reference
     docs/user-manual.md                End-user documentation
     docs/technical-manual.md           This file
@@ -204,6 +210,19 @@ All Python calls use `2>/dev/null` and `|| echo ""` fallbacks. If JSON parsing f
 }
 ```
 
+**Informal conventions (not enforced by the hook, but recognised by tooling):**
+
+- `_comment` — documentation string on any starter template; ignored by the hook and by JSON parsers that treat `_`-prefixed keys as metadata. Strip before committing to a real project if preferred.
+- `_retired_rules` — array of rules that have been superseded (bug class now covered by CI/types, or code area removed). Preserved for reference but not read by the hook. Pattern: move aged-out rules here rather than deleting them.
+
+```json
+{
+  "_retired_rules": [
+    "Rule that was valid until the auth rewrite in Sprint 12 — kept for context"
+  ]
+}
+```
+
 All fields except `project` and `pipeline_files` are optional. A minimal valid config:
 
 ```json
@@ -315,6 +334,22 @@ bash ~/GitHub/ACS/acs-repo/scripts/init_project.sh
 ---
 
 ## Extending ACS
+
+### Adding a new starter contract template
+
+Starter contracts live in `templates/contracts/`. Each is a valid `contract.json` with generic path fragments and universally applicable rules for a project type.
+
+To add a new starter:
+
+1. Create `templates/contracts/<type>.json` — use an existing starter as a model. Include a `_comment` field explaining the target project type.
+2. Add a case to `scripts/init_project.sh`:
+   ```bash
+   echo "  N) your-type-name     — description"
+   ...
+   case "$STARTER_CHOICE" in
+       N) load_starter "$STARTERS_DIR/your-type-name.json" ;;
+   ```
+3. Keep starters to 4–5 rules maximum. Rules must be universally true for that project type — not specific to one project's history. Test: *"Would this rule have prevented a real bug in at least three different projects of this type?"*
 
 ### Adding a new contract category
 
