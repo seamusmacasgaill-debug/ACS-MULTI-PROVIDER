@@ -107,6 +107,67 @@ From this point, any edit to a pipeline file triggers the contract check automat
 
 ---
 
+## Starter contracts — day 0 setup
+
+ACS ships five pre-built starter contracts for common project types. Run `init_project.sh` and select one:
+
+| Starter | Good for |
+|---------|---------|
+| `nextjs-web-app` | Next.js apps with auth, email, billing, database |
+| `stripe-integration` | Any project with Stripe checkout or subscriptions |
+| `html-css-pipeline` | HTML/CSS generation with a generator stage + post-processors |
+| `database-schema` | Prisma or Drizzle schema + migration files |
+| `auth-email` | Magic link or token-based authentication flows |
+
+Starters give you 4–5 rules that are universally true for that project type — derived from bugs that have caused production incidents across many projects. You do not need to have experienced the failures yourself to benefit from the rules.
+
+**After loading a starter:** edit `pipeline_files` to match your actual file paths. The patterns in the starter are generic fragments (`src/lib/auth`, `webhooks/stripe`) — confirm they substring-match your real files before committing.
+
+---
+
+## Growing the contract — the incident → rule loop
+
+The starter gets you to day 0. The contract becomes genuinely valuable when it grows from your own incidents.
+
+**The two-event threshold:**
+
+- **First occurrence** of a bug class on a pipeline file → log it in your session doc under "Pipeline Contract Candidates." Do not add a rule yet — it may be a one-off.
+- **Second occurrence** of the same class → add a rule to `.acs/contract.json` now. A second hit is evidence of a structural gap, not bad luck.
+
+At the closing trigger of every session: review the Pipeline Contract Candidates table. If any class has appeared before, that is your second event — add the rule.
+
+**Writing a rule from an incident:**
+
+A good rule comes from answering: *"What would I have needed to know, at the moment of editing the file, to prevent this bug?"* Not the fix — the check that would have caught it before the edit was written.
+
+Good: `"After any CSS var replacement pass, verify the .bg-white contrast block was not overwritten — check rendered output on a dark palette"`  
+Bad: `"Be careful with CSS"` — not actionable; not checkable
+
+The rule should be completable as a checkbox item at the moment of editing.
+
+---
+
+## Contract hygiene — ranking and pruning
+
+A contract with 20 rules is ignored. A contract with 8 rules is read. Keep it short.
+
+**When to prune:** when the list approaches 10–12 rules, review before adding a new one.
+
+**Ranking — what stays:**
+
+| Factor | Keeps a rule | Removes a rule |
+|--------|-------------|----------------|
+| Frequency | Bug class occurred 3+ times | Bug class occurred once and was architectural |
+| Blast radius | Failure silently breaks another file | Failure is visible immediately (type error, 500) |
+| Detectability gap | No automated test catches this | CI/type checker now covers this class |
+| Recency | In-scope active code area | Area not touched in 30+ sessions AND unchanged |
+
+**The pruning test:** for each rule, ask: *"If we removed this rule and a new agent edited the file tomorrow — would they make the same mistake?"* If yes, the rule stays. If the answer is no (because a test now catches it, or the code was refactored away), remove it.
+
+Rules that have been silent for 30+ sessions AND whose bug class is now covered by type checking or CI can be moved to a `_retired_rules` comment block in `contract.json` — preserved for reference but not injected into the hook output.
+
+---
+
 ## Writing a good contract.json
 
 The most important part of setup. A poorly written contract provides no protection.
